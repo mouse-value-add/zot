@@ -136,9 +136,10 @@ All data lives under `$ZOT_HOME`:
 
 ```
 $ZOT_HOME/
-├── config.json         # last-used provider/model/theme, saved automatically
+├── config.json         # settings, mode 0600 (may contain a session database URL)
 ├── auth.json           # api keys and oauth tokens (mode 0600)
-├── sessions/           # jsonl transcripts, one dir per cwd
+├── sessions/           # default JSONL session store, one dir per cwd
+├── sessions.db         # optional SQLite session store
 ├── models-cache.json   # live /v1/models discovery cache (6h ttl)
 ├── AGENTS.md           # optional: global instructions appended to the prompt
 ├── SYSTEM.md           # optional: replaces the default system prompt
@@ -397,8 +398,9 @@ Background subagents that run alongside your main session. Each one is a separat
 
 ### `/settings`
 
-Opens a dialog with every persistent setting. `up`/`down` to navigate, `enter` or `space` to change the selected row, `esc` to close (rows that open a sub-view, like model shortcuts, use `esc` to go back one level first). Changes are written to `$ZOT_HOME/config.json` and take effect on the next turn (no restart needed). Current settings:
+Opens a dialog with every persistent setting. `up`/`down` to navigate, `enter` or `space` to change the selected row, `esc` to close (rows that open a sub-view, like model shortcuts, use `esc` to go back one level first). Changes are written to `$ZOT_HOME/config.json`. Most take effect on the next turn without a restart; session storage changes apply on the next launch. Current settings:
 
+- **session storage**: choose filesystem (default), SQLite, PostgreSQL, or MySQL / MariaDB. Filesystem mode shows an optional absolute storage root and hides database credentials. Database modes show a masked database URL / DSN and hide the filesystem root. zot validates paths, backends, and SQL credentials before saving. Changes apply after restarting zot so the active session can finish on its original backend. `ZOT_SESSION_DATABASE_URL` still overrides the saved database value.
 - **render images when supported** — draw screenshots / `read`-returned images inline using the terminal's image protocol, or fall back to a text placeholder. Auto-detected from `TERM_PROGRAM`; the toggle overrides the detection. The row is greyed out and forced off on terminals that don't speak any image protocol.
 - **auto-swarm** — let the main agent spawn background sub-agents in parallel via a built-in `swarm_spawn` tool. Off by default. When on, the tool is registered with the running agent, the system prompt gains a short addendum telling the model to delegate independent sub-tasks proactively, and zot watches every sub-agent the main agent spawns. As soon as the last sub-agent in a batch finishes its initial task, an `[auto-swarm update]` message is injected back into the chat with each agent's status / task / transcript tail, so the main agent can summarise the collective outcome. Flipping off mid-session removes the tool from the live agent and strips the addendum on the next turn — the model stops trying to delegate. See `/swarm` for the dashboard that lets you monitor, message, kill, or remove the spawned agents.
 - **auto-compact threshold** — choose `off`, `70%`, `80%`, `85%` (default), or `90%` of the model's advertised context window. The selected percentage controls automatic compaction before and after interactive turns and persists as `auto_compact_threshold`. `off` disables percentage-based triggers but keeps manual `/compact` and automatic recovery from context-window and payload-too-large responses.
@@ -428,7 +430,57 @@ This is a guardrail against accidents, not a hard security boundary. If you need
 
 ## Sessions
 
-Every interactive or print/json run (unless `--no-session`) writes a JSONL transcript under `$ZOT_HOME/sessions/<cwd-hash>/`. Resume any of them with `--continue`, `--resume`, `--session <path>`, or interactively via `/sessions` inside the TUI. Empty sessions (the user exited without prompting) are deleted on close so the list stays tidy.
+Every interactive or print/json run (unless `--no-session`) persists a transcript. The default backend remains JSONL files under `$ZOT_HOME/sessions/<cwd-hash>/`. Resume sessions with `--continue`, `--resume`, `--session <path>`, or interactively via `/sessions` inside the TUI. Empty sessions (the user exited without prompting) are deleted on close so the list stays tidy.
+
+### Session storage
+
+Set `session_storage` in `$ZOT_HOME/config.json` to override the filesystem root or use SQLite, PostgreSQL, MySQL, or MariaDB instead of JSONL files. zot uses Go's `database/sql`, validates the backend and credentials at startup, pings databases with a five-second timeout, and creates its `zot_sessions` table and lookup index when needed. An invalid backend, missing database URL or DSN, failed connection, or schema error stops startup rather than silently falling back to files.
+
+Filesystem storage is the default and requires no config. Set an absolute `path` to override the `$ZOT_HOME` session root. The normal `sessions/<cwd-hash>/` layout is created below this root:
+
+```json
+{
+  "session_storage": {
+    "backend": "filesystem",
+    "path": "/absolute/path/to/zot-session-state"
+  }
+}
+```
+
+SQLite uses `$ZOT_HOME/sessions.db` when `database_url` is omitted. zot restricts plain-path SQLite database files to mode `0600`. A custom SQLite data source name is also accepted:
+
+```json
+{
+  "session_storage": {
+    "backend": "sqlite",
+    "database_url": "/absolute/path/to/zot-sessions.db"
+  }
+}
+```
+
+PostgreSQL requires a connection URL:
+
+```json
+{
+  "session_storage": {
+    "backend": "postgres",
+    "database_url": "postgres://zot:password@localhost/zot?sslmode=require"
+  }
+}
+```
+
+MySQL and MariaDB use the MySQL driver's DSN format. Use `backend: "mysql"` for either server (`mariadb` is also accepted as an alias). The database must already exist; zot creates only its table and index:
+
+```json
+{
+  "session_storage": {
+    "backend": "mysql",
+    "database_url": "zot:password@tcp(127.0.0.1:3306)/zot?charset=utf8mb4&parseTime=true"
+  }
+}
+```
+
+`ZOT_SESSION_DATABASE_URL` overrides `database_url` for all SQL backends and is preferred for database credentials. `config.json` is written with mode `0600`, but environment or service-level secret injection avoids storing the password there at all. SQL storage applies to normal, named-agent, and standalone bot conversations. Swarm subagents keep their explicit JSONL files under `$ZOT_HOME/swarm/agents/` because their subprocess resume protocol is path-based. Existing filesystem sessions are not migrated automatically when the backend changes; switch back to `filesystem` to access them, or export and import individual sessions.
 
 ## Providers
 

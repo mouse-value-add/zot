@@ -125,6 +125,12 @@ type InteractiveConfig struct {
 	AutoSwarmSystemAddendum string
 	SettingsStore           SettingsStore
 
+	// SessionStorageBackend, SessionStoragePath, and SessionDatabaseURL mirror
+	// the persisted session storage settings. Changes apply on next launch.
+	SessionStorageBackend string
+	SessionStoragePath    string
+	SessionDatabaseURL    string
+
 	// Agent is optional. If nil, zot opens without credentials; the
 	// user must /login before they can prompt.
 	Agent *core.Agent
@@ -350,6 +356,10 @@ type showInstructionsSettingsStore interface {
 
 type autoCompactThresholdSettingsStore interface {
 	SetAutoCompactThreshold(percent int) error
+}
+
+type sessionStorageSettingsStore interface {
+	SetSessionStorage(backend, path, databaseURL string) error
 }
 
 type Interactive struct {
@@ -3473,6 +3483,12 @@ func (i *Interactive) openSettingsDialog() {
 
 	items := []settingsItem{
 		{
+			key:      "session_storage",
+			label:    "session storage",
+			desc:     "choose the transcript backend and credentials; changes apply on next launch",
+			children: i.sessionStorageSettingItems(),
+		},
+		{
 			key:      "inline_images_enabled",
 			label:    "render images when supported",
 			desc:     "draw screenshots inline instead of showing a text placeholder",
@@ -3583,6 +3599,12 @@ func (i *Interactive) applySettingChange(act settingsAction) {
 		i.applyThemeSetting(act.StringValue)
 	case act.Key == "auto_compact_threshold":
 		i.applyAutoCompactThresholdSetting(act.StringValue)
+	case act.Key == "session_storage_backend":
+		i.applySessionStorageBackendSetting(act.StringValue)
+	case act.Key == "session_storage_path":
+		i.applySessionStoragePathSetting(act.StringValue)
+	case act.Key == "session_database_url":
+		i.applySessionDatabaseURLSetting(act.StringValue)
 	case act.Key == "tui_input_style":
 		i.applyTUIInputStyleSetting(act.StringValue)
 	case act.Key == "tui_status_position":
@@ -3592,6 +3614,111 @@ func (i *Interactive) applySettingChange(act settingsAction) {
 	default:
 		i.applySettingToggle(act.Key, act.Value)
 	}
+}
+
+func (i *Interactive) sessionStorageSettingItems() []settingsItem {
+	backend := i.cfg.SessionStorageBackend
+	if backend == "" {
+		backend = "filesystem"
+	}
+	options := []settingsOption{
+		{value: "filesystem", label: "filesystem", desc: "store JSONL transcripts under a configurable filesystem root (default)"},
+		{value: "sqlite", label: "SQLite", desc: "store sessions in SQLite; an empty database URL uses $ZOT_HOME/sessions.db"},
+		{value: "postgres", label: "PostgreSQL", desc: "store sessions in PostgreSQL using the configured database URL"},
+		{value: "mysql", label: "MySQL / MariaDB", desc: "store sessions in MySQL or MariaDB using the configured database DSN"},
+	}
+	choice := 0
+	for idx, option := range options {
+		if option.value == backend {
+			choice = idx
+			break
+		}
+	}
+	items := []settingsItem{{key: "session_storage_backend", label: "backend", desc: "validate and select filesystem, SQLite, PostgreSQL, or MySQL / MariaDB", options: options, choice: choice}}
+	if backend == "filesystem" {
+		items = append(items, settingsItem{key: "session_storage_path", label: "storage root", desc: "absolute root directory; empty uses $ZOT_HOME", text: true, stringValue: i.cfg.SessionStoragePath})
+	} else {
+		items = append(items, settingsItem{key: "session_database_url", label: "database URL / DSN", desc: "database/sql data source name; ZOT_SESSION_DATABASE_URL overrides this value", text: true, secret: true, stringValue: i.cfg.SessionDatabaseURL})
+	}
+	return items
+}
+
+func (i *Interactive) refreshSessionStorageSettings() {
+	if i.settingsDialog == nil || !i.settingsDialog.Active() || i.settingsDialog.title != "settings: session storage" {
+		return
+	}
+	i.settingsDialog.items = i.sessionStorageSettingItems()
+	i.settingsDialog.cursor = 0
+	i.settingsDialog.optionCursor = 0
+}
+
+func (i *Interactive) applySessionStorageBackendSetting(backend string) {
+	store, ok := i.cfg.SettingsStore.(sessionStorageSettingsStore)
+	if !ok {
+		return
+	}
+	if err := store.SetSessionStorage(backend, i.cfg.SessionStoragePath, i.cfg.SessionDatabaseURL); err != nil {
+		i.mu.Lock()
+		// Keep an unsaved database choice visible so a missing or invalid DSN
+		// can be corrected without showing credentials in filesystem mode.
+		if backend != "filesystem" {
+			i.cfg.SessionStorageBackend = backend
+			i.statusErr = "settings: " + err.Error() + "; enter a database URL / DSN"
+		} else {
+			i.statusErr = "settings: " + err.Error()
+		}
+		i.mu.Unlock()
+		i.refreshSessionStorageSettings()
+		i.invalidate()
+		return
+	}
+	i.mu.Lock()
+	i.cfg.SessionStorageBackend = backend
+	i.statusErr = ""
+	i.statusOK = "session storage set to " + backend + "; restart zot to apply"
+	i.mu.Unlock()
+	i.refreshSessionStorageSettings()
+	i.invalidate()
+}
+
+func (i *Interactive) applySessionStoragePathSetting(path string) {
+	store, ok := i.cfg.SettingsStore.(sessionStorageSettingsStore)
+	if !ok {
+		return
+	}
+	if err := store.SetSessionStorage("filesystem", path, i.cfg.SessionDatabaseURL); err != nil {
+		i.mu.Lock()
+		i.statusErr = "settings: " + err.Error()
+		i.mu.Unlock()
+		i.invalidate()
+		return
+	}
+	i.mu.Lock()
+	i.cfg.SessionStoragePath = strings.TrimSpace(path)
+	i.statusErr = ""
+	i.statusOK = "session filesystem root saved; restart zot to apply"
+	i.mu.Unlock()
+	i.invalidate()
+}
+
+func (i *Interactive) applySessionDatabaseURLSetting(databaseURL string) {
+	store, ok := i.cfg.SettingsStore.(sessionStorageSettingsStore)
+	if !ok {
+		return
+	}
+	if err := store.SetSessionStorage(i.cfg.SessionStorageBackend, i.cfg.SessionStoragePath, databaseURL); err != nil {
+		i.mu.Lock()
+		i.statusErr = "settings: " + err.Error()
+		i.mu.Unlock()
+		i.invalidate()
+		return
+	}
+	i.mu.Lock()
+	i.cfg.SessionDatabaseURL = databaseURL
+	i.statusErr = ""
+	i.statusOK = "session database URL saved; restart zot to apply"
+	i.mu.Unlock()
+	i.invalidate()
 }
 
 func (i *Interactive) applyAutoCompactThresholdSetting(value string) {

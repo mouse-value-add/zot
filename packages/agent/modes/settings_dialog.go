@@ -18,19 +18,24 @@ type settingsDialog struct {
 	optionCursor int
 	parentItems  []settingsItem
 	parentCursor int
+	editing      bool
+	editValue    []rune
 }
 
 type settingsItem struct {
-	key      string
-	label    string
-	desc     string
-	value    bool
-	options  []settingsOption
-	children []settingsItem
-	picker   bool
-	choice   int
-	disabled bool
-	hint     string
+	key         string
+	label       string
+	desc        string
+	value       bool
+	options     []settingsOption
+	children    []settingsItem
+	picker      bool
+	choice      int
+	disabled    bool
+	hint        string
+	text        bool
+	secret      bool
+	stringValue string
 }
 
 type settingsOption struct {
@@ -58,6 +63,8 @@ func (d *settingsDialog) Open(items []settingsItem) bool {
 	d.items = items
 	d.cursor = 0
 	d.selecting = false
+	d.editing = false
+	d.editValue = nil
 	d.direct = false
 	d.optionCursor = 0
 	d.parentItems = nil
@@ -74,6 +81,8 @@ func (d *settingsDialog) OpenDirectOption(item settingsItem) bool {
 	d.items = []settingsItem{item}
 	d.cursor = 0
 	d.selecting = true
+	d.editing = false
+	d.editValue = nil
 	d.direct = true
 	d.optionCursor = item.choice
 	if d.optionCursor < 0 || d.optionCursor >= len(item.options) {
@@ -88,12 +97,17 @@ func (d *settingsDialog) OpenDirectOption(item settingsItem) bool {
 func (d *settingsDialog) Close() {
 	d.active = false
 	d.selecting = false
+	d.editing = false
+	d.editValue = nil
 	d.direct = false
 	d.parentItems = nil
 }
 func (d *settingsDialog) Active() bool { return d != nil && d.active }
 
 func (d *settingsDialog) HandleKey(k tui.Key) settingsAction {
+	if d.editing {
+		return d.handleTextKey(k)
+	}
 	if d.selecting {
 		return d.handleOptionKey(k)
 	}
@@ -130,6 +144,36 @@ func (d *settingsDialog) HandleKey(k tui.Key) settingsAction {
 		if k.Rune == ' ' {
 			return d.toggleCurrent()
 		}
+	}
+	return settingsAction{}
+}
+
+func (d *settingsDialog) handleTextKey(k tui.Key) settingsAction {
+	if len(d.items) == 0 || d.cursor < 0 || d.cursor >= len(d.items) {
+		d.editing = false
+		return settingsAction{}
+	}
+	item := d.items[d.cursor]
+	switch k.Kind {
+	case tui.KeyRune:
+		d.editValue = append(d.editValue, k.Rune)
+	case tui.KeyPaste:
+		d.editValue = append(d.editValue, []rune(k.Paste)...)
+	case tui.KeyBackspace, tui.KeyDelete:
+		if len(d.editValue) > 0 {
+			d.editValue = d.editValue[:len(d.editValue)-1]
+		}
+	case tui.KeyCtrlU:
+		d.editValue = nil
+	case tui.KeyEsc:
+		d.editing = false
+		d.editValue = nil
+	case tui.KeyEnter:
+		item.stringValue = string(d.editValue)
+		d.items[d.cursor] = item
+		d.editing = false
+		d.editValue = nil
+		return settingsAction{Toggle: true, Key: item.key, StringValue: item.stringValue}
 	}
 	return settingsAction{}
 }
@@ -191,6 +235,11 @@ func (d *settingsDialog) toggleCurrent() settingsAction {
 		d.title = "settings: " + it.label
 		return settingsAction{}
 	}
+	if it.text {
+		d.editing = true
+		d.editValue = []rune(it.stringValue)
+		return settingsAction{}
+	}
 	if len(it.options) > 0 {
 		d.optionCursor = it.choice
 		if d.optionCursor < 0 || d.optionCursor >= len(it.options) {
@@ -232,6 +281,9 @@ func (d *settingsDialog) Render(th tui.Theme, width int) []string {
 	if !d.Active() {
 		return nil
 	}
+	if d.editing {
+		return d.renderTextInput(th, width)
+	}
 	if d.selecting {
 		return d.renderOptions(th, width)
 	}
@@ -251,6 +303,16 @@ func (d *settingsDialog) Render(th tui.Theme, width int) []string {
 		if it.picker || len(it.children) > 0 {
 			box = "[→]"
 			plain = "  " + box + " " + it.label
+		} else if it.text {
+			box = "[→]"
+			value := it.stringValue
+			if it.secret && value != "" {
+				value = "********"
+			}
+			if value == "" {
+				value = "not set"
+			}
+			plain = "  " + box + " " + it.label + ": " + value
 		} else if len(it.options) > 0 {
 			box = "[→]"
 			if it.choice < 0 || it.choice >= len(it.options) {
@@ -274,6 +336,25 @@ func (d *settingsDialog) Render(th tui.Theme, width int) []string {
 			}
 		}
 	}
+	lines = append(lines, frameRule(th, width))
+	return lines
+}
+
+func (d *settingsDialog) renderTextInput(th tui.Theme, width int) []string {
+	item := d.items[d.cursor]
+	value := string(d.editValue)
+	if item.secret && value != "" {
+		value = "********"
+	}
+	if value == "" {
+		value = " "
+	}
+	lines := []string{frameHeader(th, "settings: "+item.label, width)}
+	if item.desc != "" {
+		lines = append(lines, th.FG256(th.Muted, item.desc))
+	}
+	lines = append(lines, th.FG256(th.Muted, "enter to save, ctrl+u to clear, esc to cancel:"))
+	lines = append(lines, th.PadHighlight("  "+value, width))
 	lines = append(lines, frameRule(th, width))
 	return lines
 }

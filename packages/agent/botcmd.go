@@ -235,6 +235,16 @@ func botRun(spec *botSpec, rawTail []string, version string) error {
 	// prior context. --no-session disables.
 	var sess *core.Session
 	if !args.NoSess {
+		storageCfg, loadErr := LoadConfig()
+		if loadErr != nil {
+			return fmt.Errorf("session storage: load config: %w", loadErr)
+		}
+		cleanupStorage, storageErr := configureSessionStorage(context.Background(), storageCfg.SessionStorage)
+		if storageErr != nil {
+			return storageErr
+		}
+		defer cleanupStorage()
+
 		s, _, serr := openOrCreateSessionForBot(args, resolved, agent, version)
 		if serr == nil {
 			sess = s
@@ -297,8 +307,9 @@ func botRun(spec *botSpec, rawTail []string, version string) error {
 // openOrCreateSessionForBot reuses the same logic as interactive mode
 // but never prompts (no TTY picker); falls back to latest or new.
 func openOrCreateSessionForBot(args Args, r Resolved, ag *core.Agent, version string) (*core.Session, []any, error) {
+	root := agentSessionsRoot(ZotHome(), args)
 	if args.Continue {
-		if latest := core.LatestSession(ZotHome(), args.CWD); latest != "" {
+		if latest := core.LatestSession(root, args.CWD); latest != "" {
 			s, msgs, err := core.OpenSession(latest)
 			if err != nil {
 				return nil, nil, err
@@ -307,7 +318,7 @@ func openOrCreateSessionForBot(args Args, r Resolved, ag *core.Agent, version st
 			return s, nil, nil
 		}
 	}
-	s, err := core.NewSession(ZotHome(), args.CWD, r.Provider, r.Model, version)
+	s, err := core.NewSession(root, args.CWD, r.Provider, r.Model, version)
 	return s, nil, err
 }
 

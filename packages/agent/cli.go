@@ -252,6 +252,17 @@ func runWithArgsRaw(rawArgs []string, version string) error {
 
 func runWithArgs(args Args, version string) error {
 	ctx := context.Background()
+	if !args.NoSess && args.Mode != ModeSwarmAgent {
+		cfg, err := LoadConfig()
+		if err != nil {
+			return fmt.Errorf("session storage: load config: %w", err)
+		}
+		cleanup, err := configureSessionStorage(ctx, cfg.SessionStorage)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+	}
 	switch args.Mode {
 	case ModePrint:
 		return runPrintMode(ctx, args, version)
@@ -1266,6 +1277,9 @@ func runInteractive(ctx context.Context, args Args, version string) error {
 		ExtensionThemes:           extMgr.ThemeOptions,
 		AutoSwarmSystemAddendum:   AutoSwarmSystemAddendum,
 		SettingsStore:             configSettingsStore{},
+		SessionStorageBackend:     initialCfg.SessionStorage.normalizedBackend(),
+		SessionStoragePath:        initialCfg.SessionStorage.Path,
+		SessionDatabaseURL:        initialCfg.SessionStorage.DatabaseURL,
 		Model:                     r.Model,
 		Provider:                  r.Provider,
 		AuthMethod:                r.AuthMethod,
@@ -1465,10 +1479,7 @@ func runInteractive(ctx context.Context, args Args, version string) error {
 }
 
 func agentSessionsRoot(root string, args Args) string {
-	if args.AgentName == "" {
-		return root
-	}
-	return filepath.Join(root, "sessions", "agents", safeAgentName(args.AgentName))
+	return configuredSessionRoot(root, args.AgentName)
 }
 
 // openOrCreateSession returns a session for the run. sess may be nil

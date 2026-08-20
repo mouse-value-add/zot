@@ -43,7 +43,7 @@ func ExportSession(srcPath, dstPath string) (string, error) {
 	// Read the source meta up-front so we can name the output sensibly
 	// when dstPath is a directory, and so we can validate it's a real
 	// session before starting to write.
-	src, err := os.Open(srcPath)
+	src, err := openSessionReader(srcPath)
 	if err != nil {
 		return "", fmt.Errorf("export: open source: %w", err)
 	}
@@ -86,9 +86,14 @@ func ExportSession(srcPath, dstPath string) (string, error) {
 	}
 
 	// Re-open the source from the top since we advanced the scanner.
-	if _, err := src.Seek(0, io.SeekStart); err != nil {
-		return "", fmt.Errorf("export: rewind: %w", err)
+	if err := src.Close(); err != nil {
+		return "", fmt.Errorf("export: close source: %w", err)
 	}
+	src, err = openSessionReader(srcPath)
+	if err != nil {
+		return "", fmt.Errorf("export: reopen source: %w", err)
+	}
+	defer src.Close()
 
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return "", fmt.Errorf("export: mkdir dst: %w", err)
@@ -181,16 +186,9 @@ func ImportSession(srcPath, root, cwd, version string) (string, error) {
 		return "", errors.New("import: first line is not a meta row")
 	}
 
-	// Build the destination inside the current cwd's session dir
-	// with a fresh timestamped name.
-	dir := SessionsDir(root, cwd)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
+	// Build the destination in the configured session store.
 	newID := uuid.NewString()
-	name := fmt.Sprintf("%s-%s.jsonl", time.Now().UTC().Format("20060102-150405"), newID[:8])
-	outPath := filepath.Join(dir, name)
-	dst, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	outPath, dst, err := createStoredSession(root, cwd, newID)
 	if err != nil {
 		return "", fmt.Errorf("import: create dst: %w", err)
 	}
@@ -273,7 +271,7 @@ func branchSession(parentPath, root, cwd, version string, upToMessageIdx int, hi
 		return "", errors.New("branch: upToMessageIdx must be >= 0")
 	}
 
-	src, err := os.Open(parentPath)
+	src, err := openSessionReader(parentPath)
 	if err != nil {
 		return "", fmt.Errorf("branch: open parent: %w", err)
 	}
@@ -295,15 +293,9 @@ func branchSession(parentPath, root, cwd, version string, upToMessageIdx int, hi
 	}
 	parentMeta := *head.Meta
 
-	// Build the destination file.
-	dir := SessionsDir(root, cwd)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
+	// Build the destination in the configured session store.
 	newID := uuid.NewString()
-	name := fmt.Sprintf("%s-%s.jsonl", time.Now().UTC().Format("20060102-150405"), newID[:8])
-	outPath := filepath.Join(dir, name)
-	dst, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	outPath, dst, err := createStoredSession(root, cwd, newID)
 	if err != nil {
 		return "", fmt.Errorf("branch: create dst: %w", err)
 	}
@@ -337,9 +329,14 @@ func branchSession(parentPath, root, cwd, version string, upToMessageIdx int, hi
 	// does: message rows append, and compaction rows replace everything
 	// before them. The fork index is defined over that effective stream,
 	// not over the raw audit rows kept on disk before a compaction.
-	if _, err := src.Seek(0, io.SeekStart); err != nil {
-		return "", fmt.Errorf("branch: rewind parent: %w", err)
+	if err := src.Close(); err != nil {
+		return "", fmt.Errorf("branch: close parent: %w", err)
 	}
+	src, err = openSessionReader(parentPath)
+	if err != nil {
+		return "", fmt.Errorf("branch: reopen parent: %w", err)
+	}
+	defer src.Close()
 	var effective []provider.Message
 	var nonCompactedRows [][]byte
 	effectiveCount := 0
@@ -444,18 +441,10 @@ type TreeNode struct {
 // session placed under its parent. Used by /session tree to render
 // the branch hierarchy.
 func BuildSessionTree(root, cwd string) []*TreeNode {
-	dir := SessionsDir(root, cwd)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil
-	}
+	paths := ListSessions(root, cwd)
 	nodes := make(map[string]*TreeNode)
 	order := []string{}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
+	for _, path := range paths {
 		summary := describeSession(path)
 		meta, _ := readSessionMeta(path)
 		if meta.ID == "" {
@@ -485,7 +474,7 @@ func BuildSessionTree(root, cwd string) []*TreeNode {
 // readSessionMeta opens path, reads the meta row, and returns it.
 // Empty SessionMeta when the file is missing or not a valid session.
 func readSessionMeta(path string) (SessionMeta, error) {
-	f, err := os.Open(path)
+	f, err := openSessionReader(path)
 	if err != nil {
 		return SessionMeta{}, err
 	}
@@ -509,16 +498,7 @@ func readSessionMeta(path string) (SessionMeta, error) {
 // matches. Used by /session tree when the user picks an entry. O(n)
 // over the files in the dir; the list is small in practice.
 func FindSessionByID(root, cwd, id string) string {
-	dir := SessionsDir(root, cwd)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
+	for _, path := range ListSessions(root, cwd) {
 		meta, err := readSessionMeta(path)
 		if err != nil {
 			continue

@@ -112,6 +112,10 @@ type Config struct {
 	// the corresponding standard proxy environment variable is not already set.
 	HTTPProxy string `json:"http_proxy,omitempty"`
 
+	// SessionStorage selects filesystem (the default), SQLite, PostgreSQL,
+	// MySQL, or MariaDB persistence for conversation transcripts.
+	SessionStorage SessionStorageConfig `json:"session_storage,omitempty"`
+
 	// LastChangelogShown is the version whose release-notes
 	// dialog the user has already seen. When the running binary's
 	// version differs, the next interactive run shows the
@@ -213,6 +217,9 @@ func LoadConfig() (Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, fmt.Errorf("parse config: %w", err)
 	}
+	// Config may contain a session database URL. Tighten permissions on
+	// older files that were created before config.json became sensitive.
+	_ = os.Chmod(ConfigPath(), 0o600)
 	return c, nil
 }
 
@@ -225,7 +232,10 @@ func SaveConfig(c Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(ConfigPath(), b, 0o644)
+	if err := os.WriteFile(ConfigPath(), b, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(ConfigPath(), 0o600)
 }
 
 // applyConfiguredHTTPProxy makes the persisted proxy available to Go's
